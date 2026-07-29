@@ -1,0 +1,21 @@
+# Логи
+storage/logs/*
+!storage/logs/.gitkeep
+
+# Конфиг с паролями (НИКОГДА не коммитим секреты)
+config/config.php
+
+# Composer
+vendor/
+
+# Временные файлы
+*.log
+*.dat
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
