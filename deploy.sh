@@ -5,7 +5,7 @@ set -e
 # Конфигурация
 # =========================
 APP_DIR="/var/www/html/newapi"
-REPO_URL="https://github.com/ВАШ_ЮЗЕР/smartbar-api.git"
+REPO_URL="https://github.com/hexplode13/sbapi.git"
 BRANCH="main"
 DB_USER="smartbar"
 DB_PASS="h2so4"
