@@ -41,7 +41,9 @@ if [ "$MODE" = "install" ]; then
     # 1. Установка зависимостей
     log "Установка системных пакетов..."
     apt-get update -qq
-    apt-get install -y -qq \
+    
+    # Убрали php-json (он встроен), mariadb (чтобы не конфликтовал с MySQL) и flock (он в util-linux)
+    apt-get install -y \
         git \
         curl \
         php${PHP_VERSION}-fpm \
@@ -49,13 +51,10 @@ if [ "$MODE" = "install" ]; then
         php${PHP_VERSION}-curl \
         php${PHP_VERSION}-mbstring \
         php${PHP_VERSION}-xml \
-        php${PHP_VERSION}-json \
         nginx \
         composer \
         cron \
-        mariadb-server \
-        flock \
-        > /dev/null 2>&1
+        util-linux
 
     # 2. Включение модулей PHP
     log "Включение PHP-модулей..."
@@ -107,29 +106,129 @@ EOSQL
         fi
     done
 
-    # 8. Nginx конфиг
+        # 8. Nginx конфиг (генерация целиком)
     log "Настройка nginx..."
-    NGINX_CONF="/etc/nginx/sites-available/newapi"
-    NGINX_ENABLED="/etc/nginx/sites-enabled/newapi"
+    NGINX_DEFAULT="/etc/nginx/sites-available/default"
+    NGINX_BACKUP="/etc/nginx/sites-available/default.original.backup"
 
-    # Вставляем блок newapi в существующий конфиг сервера
-    # Если у вас один серверный блок в /etc/nginx/sites-enabled/default,
-    # можно вставить include:
-    if [ -f "$APP_DIR/nginx/newapi.conf" ]; then
-        # Проверяем, не вставлен ли уже
-        MAIN_NGINX_CONF=$(grep -rl "server_name" /etc/nginx/sites-enabled/ 2>/dev/null | head -1)
-        if [ -n "$MAIN_NGINX_CONF" ]; then
-            if ! grep -q "newapi.conf" "$MAIN_NGINX_CONF" 2>/dev/null; then
-                # Вставляем include перед последней закрывающей скобкой
-                sed -i "/^}$/i\\    include ${APP_DIR}/nginx/newapi.conf;" "$MAIN_NGINX_CONF"
-                log "Nginx include добавлен в $MAIN_NGINX_CONF"
-            else
-                warn "Nginx include уже существует"
-            fi
-        fi
+    # Делаем бэкап оригинального default только один раз
+    if [ -f "$NGINX_DEFAULT" ] && [ ! -f "$NGINX_BACKUP" ]; then
+        cp "$NGINX_DEFAULT" "$NGINX_BACKUP"
+        log "Создан бэкап оригинального nginx конфига: $NGINX_BACKUP"
     fi
 
-    nginx -t && systemctl reload nginx
+    # Генерируем новый конфиг целиком
+    cat > "$NGINX_DEFAULT" <<'NGINX_CONF'
+server {
+    charset utf-8;
+    server_name 192.168.0.213 _;
+
+    root /var/www/html/;
+
+    access_log /var/log/nginx/sb-a.log;
+    error_log /var/log/nginx/sb-e.log;
+
+    index index.php index.html;
+
+    client_max_body_size 10m;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location /auth/ {
+        try_files $uri /auth/index.html;
+    }
+
+    # =========================
+    # NEW API in /newapi
+    # =========================
+
+    # Обработка статики и перенаправление на фронт-контроллер API
+    location /newapi/ {
+        # Используем root вместо alias, указывая путь ДО папки /newapi/
+        root /var/www/html/newapi/public;
+
+        # Меняем URI на внутренний путь к index.php
+        try_files $uri $uri/ /newapi/public/index.php?$query_string;
+    }
+
+    # Обработка PHP конкретно для нового API
+    location ~ ^/newapi/public/index\.php$ {
+        # Скрываем локацию от внешних прямых запросов
+        internal;
+
+        fastcgi_buffer_size 32k;
+        fastcgi_buffers 4 32k;
+        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+
+        include fastcgi_params;
+
+        # Четко задаем пути к файлу
+        fastcgi_param SCRIPT_FILENAME /var/www/html/newapi/public/index.php;
+        fastcgi_param DOCUMENT_ROOT   /var/www/html/newapi/public;
+
+        # Передаем правильные заголовки и параметры
+        fastcgi_param REQUEST_URI       $request_uri;
+        fastcgi_param QUERY_STRING      $query_string;
+        fastcgi_param REQUEST_METHOD     $request_method;
+        fastcgi_param CONTENT_TYPE       $content_type;
+        fastcgi_param CONTENT_LENGTH     $content_length;
+        fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+
+        fastcgi_ignore_client_abort off;
+        fastcgi_read_timeout 360;
+    }
+    # END NEW API
+    # =========================
+
+    location ~ /\.ht {
+        deny all;
+    }
+
+    location = /favicon.ico {
+        log_not_found off;
+        access_log off;
+    }
+
+    location = /robots.txt {
+        allow all;
+        log_not_found off;
+        access_log off;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+
+        fastcgi_buffer_size 32k;
+        fastcgi_buffers 4 32k;
+
+        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+        fastcgi_index index.php;
+
+        include fastcgi_params;
+
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+
+        fastcgi_ignore_client_abort off;
+        fastcgi_read_timeout 360;
+    }
+}
+NGINX_CONF
+
+    # Убеждаемся, что симлинк в sites-enabled существует
+    if [ ! -L "/etc/nginx/sites-enabled/default" ]; then
+        ln -sf "$NGINX_DEFAULT" /etc/nginx/sites-enabled/default
+    fi
+
+    # Проверка и перезагрузка
+    if nginx -t; then
+        systemctl reload nginx
+        log "Nginx конфиг успешно обновлён и перезагружен"
+    else
+        err "Ошибка в сгенерированном nginx конфиге! Проверьте: nginx -t"
+    fi
 
     # 9. Права
     log "Настройка прав..."
