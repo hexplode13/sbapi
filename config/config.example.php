@@ -5,7 +5,7 @@ return [
         'host' => 'localhost',
         'name' => 'checks_db',
         'user' => 'smartbar',
-        'pass' => 'CHANGEME',
+        'pass' => 'CHANGE_ME',
         'charset' => 'utf8mb4',
     ],
 
