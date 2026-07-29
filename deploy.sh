@@ -252,6 +252,21 @@ EOCRON
     chmod 644 "$CRON_FILE"
     systemctl restart cron
 
+        # 11. Автообновление из git
+    log "Настройка автообновления..."
+    AUTO_CRON="/etc/cron.d/smartbar-autoupdate"
+    cat > "$AUTO_CRON" <<EOCRON
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Каждые 10 минут проверяем обновления в git
+*/10 * * * * root /bin/bash ${APP_DIR}/bin/auto-update.sh
+
+EOCRON
+    chown root:root "$AUTO_CRON"
+    chmod 644 "$AUTO_CRON"
+    systemctl restart cron
+
     log "=== УСТАНОВКА ЗАВЕРШЕНА ==="
     log "Проверьте: curl http://$(hostname -I | awk '{print $1}')/newapi/test"
 
