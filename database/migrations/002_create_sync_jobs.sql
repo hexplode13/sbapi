@@ -18,8 +18,9 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 
 -- Поля для фоновой отправки на внешний сервер
 
-ALTER TABLE my_orders ADD COLUMN sync_attempts INT UNSIGNED NOT NULL DEFAULT 0;
-ALTER TABLE my_orders ADD COLUMN sync_last_error TEXT NULL;
-ALTER TABLE my_orders ADD COLUMN sync_next_attempt_at DATETIME NULL;
+ALTER TABLE my_orders ADD COLUMN IF NOT EXISTS sended INT NULL;
+ALTER TABLE my_orders ADD COLUMN IF NOT EXISTS sync_attempts INT UNSIGNED NOT NULL DEFAULT 0;
+ALTER TABLE my_orders ADD COLUMN IF NOT EXISTS sync_last_error TEXT NULL;
+ALTER TABLE my_orders ADD COLUMN IF NOT EXISTS sync_next_attempt_at DATETIME NULL;
 
-ALTER TABLE my_orders ADD INDEX idx_my_orders_sync_pending (sended, sync_next_attempt_at);
+ALTER TABLE my_orders ADD INDEX IF NOT EXISTS idx_my_orders_sync_pending (sended, sync_next_attempt_at);
