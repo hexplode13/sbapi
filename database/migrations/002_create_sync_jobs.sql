@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 
 -- Поля для фоновой отправки на внешний сервер
 
-ALTER TABLE my_orders ADD COLUMN sended INT NULL;
 ALTER TABLE my_orders ADD COLUMN sync_attempts INT UNSIGNED NOT NULL DEFAULT 0;
 ALTER TABLE my_orders ADD COLUMN sync_last_error TEXT NULL;
 ALTER TABLE my_orders ADD COLUMN sync_next_attempt_at DATETIME NULL;
