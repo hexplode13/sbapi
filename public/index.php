@@ -1,5 +1,5 @@
 <?php
-//TEST AUTO UPDATE
+//AUTO UPDATE CHECKOUT
 declare(strict_types=1);
 
 use App\Controllers\HealthController;
