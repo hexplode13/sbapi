@@ -52,9 +52,9 @@ for migration in "$APP_DIR"/database/migrations/*.sql; do
 done
 
 # Фиксим регистр папок (на всякий случай)
-if [ -d "$APP_DIR/App" ]; then
-    mv "$APP_DIR/App" "$APP_DIR/app"
-    log "Исправлен регистр папки: App -> app"
+if [ -d "$APP_DIR/app" ]; then
+    mv "$APP_DIR/app" "$APP_DIR/App"
+    log "Исправлен регистр папки: app -> App"
 fi
 
 # Обновляем права
