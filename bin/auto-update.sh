@@ -6,63 +6,72 @@ LOG_FILE="$APP_DIR/storage/logs/auto-update.log"
 DB_USER="smartbar"
 DB_PASS="h2so4"
 DB_NAME="checks_db"
+REPO_URL="https://github.com/hexplode13/sbapi.git" # Явно указываем HTTPS
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
 cd "$APP_DIR" || exit 1
 
-# Проверяем, есть ли новые коммиты
-LOCAL=$(git rev-parse HEAD 2>/dev/null)
-REMOTE=$(git ls-remote origin HEAD 2>/dev/null | cut -f1)
-
-if [ -z "$REMOTE" ]; then
-    log "Нет доступа к репозиторию"
+# 1. Проверка связи с GitHub (пинг не всегда работает из-за ICMP, пробуем curl)
+if ! curl -s --max-time 5 https://github.com > /dev/null; then
+    log "Нет интернета или GitHub недоступен"
     exit 0
 fi
 
-if [ "$LOCAL" = "$REMOTE" ]; then
-    # Обновлений нет — выходим молча
+# 2. Проверяем наличие новых коммитов через HTTPS
+# Используем git ls-remote с явным указанием URL, чтобы избежать проблем с origin
+REMOTE_HASH=$(git ls-remote "$REPO_URL" HEAD 2>&1 | cut -f1)
+
+if [ -z "$REMOTE_HASH" ]; then
+    log "Ошибка получения данных от репозитория: $REMOTE_HASH"
     exit 0
 fi
 
-log "Найдено обновление: $LOCAL -> $REMOTE"
+LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null)
 
-# Сохраняем локальные изменения (на всякий случай)
+if [ "$LOCAL_HASH" = "$REMOTE_HASH" ]; then
+    # Обновлений нет — выходим молча, чтобы не засорять лог
+    exit 0
+fi
+
+log "Найдено обновление: $LOCAL_HASH -> $REMOTE_HASH"
+
+# 3. Сохраняем локальные изменения (на всякий случай)
 git stash --include-untracked >> "$LOG_FILE" 2>&1
 
-# Тянем изменения
-if ! git pull --ff-only origin main >> "$LOG_FILE" 2>&1; then
-    log "Ошибка git pull"
-    git stash pop >> "$LOG_FILE" 2>&1
-    exit 1
+# 4. Тянем изменения
+if ! git pull --ff-only "$REPO_URL" main >> "$LOG_FILE" 2>&1; then
+    log "Ошибка git pull. Пробуем reset..."
+    git reset --hard HEAD >> "$LOG_FILE" 2>&1
+    git pull "$REPO_URL" main >> "$LOG_FILE" 2>&1
 fi
 
 git stash pop >> "$LOG_FILE" 2>&1 || true
 
-# Обновляем composer
+# 5. Обновляем composer
 composer install --no-dev --optimize-autoloader --quiet >> "$LOG_FILE" 2>&1 || true
 
-# Применяем миграции
+# 6. Применяем миграции
 for migration in "$APP_DIR"/database/migrations/*.sql; do
     [ -f "$migration" ] || continue
     mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$migration" >> "$LOG_FILE" 2>&1 || true
 done
 
-# Фиксим регистр папок (если в git снова заедет App вместо app)
+# 7. Фиксим регистр папок (если в git снова заедет App вместо app)
 if [ -d "$APP_DIR/App" ]; then
     mv "$APP_DIR/App" "$APP_DIR/app"
     log "Исправлен регистр: App -> app"
 fi
 
-# Права
+# 8. Права
 chown -R www-data:www-data "$APP_DIR" >> /dev/null 2>&1
 chmod -R 775 "$APP_DIR/storage" >> /dev/null 2>&1
 
-# Перезапуск сервисов
+# 9. Перезапуск сервисов
 systemctl reload php8.2-fpm >> "$LOG_FILE" 2>&1
 nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx >> "$LOG_FILE" 2>&1
 
-# Убиваем зависшие процессы timesend
+# 10. Убиваем зависшие процессы timesend
 pkill -f timesend.php >> /dev/null 2>&1 || true
 rm -f /tmp/smartbar-timesend.lock
 
