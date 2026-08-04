@@ -22,13 +22,23 @@ git config --global --add safe.directory "$APP_DIR" 2>/dev/null
 log "=== Начало проверки обновлений ==="
 
 # Пытаемся сделать pull
-# Если есть обновления, git их заберет. Если нет — напишет "Already up to date".
+# Если есть конфликтующие файлы, мы принудительно сбрасываем их и тянем заново
 PULL_OUTPUT=$(git pull origin main 2>&1)
 PULL_EXIT=$?
 
 if [ $PULL_EXIT -ne 0 ]; then
-    log "Ошибка git pull: $PULL_OUTPUT"
-    exit 1
+    # Если ошибка из-за локальных изменений, делаем hard reset этого файла и пробуем снова
+    if echo "$PULL_OUTPUT" | grep -q "would be overwritten"; then
+        log "Обнаружены локальные изменения в скрипте. Сбрасываем..."
+        git checkout -- bin/auto-update.sh
+        PULL_OUTPUT=$(git pull origin main 2>&1)
+        PULL_EXIT=$?
+    fi
+    
+    if [ $PULL_EXIT -ne 0 ]; then
+        log "Критическая ошибка git pull: $PULL_OUTPUT"
+        exit 1
+    fi
 fi
 
 # Проверяем, были ли реальные изменения
