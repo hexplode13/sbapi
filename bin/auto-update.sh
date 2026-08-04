@@ -12,6 +12,10 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
 cd "$APP_DIR" || exit 1
 
+# === ДОБАВИТЬ ЭТОТ БЛОК ===
+# Проверяем, доверяет ли текущий пользователь этой папке
+if ! git config --global --get safe.directory | grep -
+
 # 1. Проверка связи с GitHub (пинг не всегда работает из-за ICMP, пробуем curl)
 if ! curl -s --max-time 5 https://github.com > /dev/null; then
     log "Нет интернета или GitHub недоступен"
@@ -58,9 +62,9 @@ for migration in "$APP_DIR"/database/migrations/*.sql; do
 done
 
 # 7. Фиксим регистр папок (если в git снова заедет App вместо app)
-if [ -d "$APP_DIR/App" ]; then
-    mv "$APP_DIR/App" "$APP_DIR/app"
-    log "Исправлен регистр: App -> app"
+if [ -d "$APP_DIR/app" ]; then
+    mv "$APP_DIR/app" "$APP_DIR/App"
+    log "Исправлен регистр: app -> App"
 fi
 
 # 8. Права
