@@ -12,11 +12,13 @@ class OrderService
 {
     private PDO $db;
     private SyncJobService $syncJobs;
+    private PanelService $panelService;
 
     public function __construct()
     {
         $this->db = Database::pdo();
         $this->syncJobs = new SyncJobService();
+        $this->panelService = new PanelService();
     }
 
     public function getOrders(bool $kuch = false, ?string $date = null, bool $onlyTables = false): array
@@ -238,6 +240,15 @@ class OrderService
 
             $this->db->commit();
 
+            // === ПОПЫТКА ОТПРАВКИ НА ПАНЕЛЬ ПРИ СОЗДАНИИ ===
+            $customerName = (string)($data['customer_name'] ?? $data['comment'] ?? 'Гость');
+            $assignedPanel = $this->panelService->tryAssignAndSendOrder($outid, $customerName);
+
+            if ($assignedPanel !== null) {
+                $this->panelService->markOrderAsSent($orderId, $assignedPanel);
+            }
+            // ==================================================
+
             return [
                 'id' => $orderId,
                 'outid' => $outid,
@@ -418,6 +429,24 @@ class OrderService
             $this->db->commit();
 
             $this->syncJobs->scheduleOrderTimesend($orderId);
+
+            // === ПОВТОРНАЯ ПРОВЕРКА ПАНЕЛИ ПРИ СТАТУСЕ "ГОТОВ" ===
+            // Проверяем, не был ли заказ уже отправлен на панель
+            $checkStmt = $this->db->prepare("SELECT outid, panel_sent FROM my_orders WHERE id = ?");
+            $checkStmt->execute([$orderId]);
+            $orderInfo = $checkStmt->fetch();
+
+            if ($orderInfo && (int)$orderInfo['panel_sent'] === 0) {
+                // Заказ еще не на панели, пробуем снова
+                // Имя клиента можно взять из комментария или оставить дефолтное
+                $customerName = 'Готов к выдаче'; 
+                $assignedPanel = $this->panelService->tryAssignAndSendOrder((string)$orderInfo['outid'], $customerName);
+
+                if ($assignedPanel !== null) {
+                    $this->panelService->markOrderAsSent($orderId, $assignedPanel);
+                }
+            }
+            // ====================================================
 
             return [
                 'order' => $orderId,
