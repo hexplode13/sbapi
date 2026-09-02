@@ -1,4 +1,11 @@
 #!/bin/bash
+# Скрипт автоматического обновления Smartbar API
+
+# Запрещаем интерактивный ввод credentials
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/echo
+
+#!/bin/bash
 set -e
 
 # =========================

@@ -1,3 +1,4 @@
+import httpx
 import asyncio
 import json
 import os
@@ -62,6 +63,28 @@ async def send_order_to_panel(order: Order):
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
 
+# =========================
+# УВЕДОМЛЕНИЕ PHP API
+# =========================
+PHP_API_BASE_URL = "http://192.168.0.213/newapi"
+
+async def notify_php_api_order_closed(order_id: int):
+    """Отправляет PATCH запрос в основной API о закрытии заказа"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{PHP_API_BASE_URL}/orders/{order_id}/close",
+                timeout=5.0  # Таймаут 5 секунд, чтобы не вешать сервер, если PHP API недоступен
+            )
+            if response.status_code in [200, 204]:
+                print(f"✅ Заказ #{order_id} успешно закрыт в PHP API")
+            else:
+                print(f"⚠️ PHP API вернул ошибку для заказа #{order_id}: HTTP {response.status_code} | {response.text}")
+    except httpx.RequestError as e:
+        print(f"❌ Не удалось соединиться с PHP API для заказа #{order_id}: {e}")
+    except Exception as e:
+        print(f"❌ Неожиданная ошибка при уведомлении PHP API (заказ #{order_id}): {e}")
+
 @app.websocket("/ws/panel/{panel_number}")
 async def panel_websocket(websocket: WebSocket, panel_number: int):
     await websocket.accept()
@@ -123,6 +146,10 @@ async def handle_panel_message(panel_number: int, message: dict):
                 order.completed_at = datetime.utcnow()
             await db.commit()
             print(f"Panel #{panel_number}: Заказ #{order_id} → {status}")
+
+        # 👇 ДОБАВИТЬ ЭТУ СТРОКУ 👇
+        if new_status == OrderStatus.COMPLETED:
+            await notify_php_api_order_closed(order.id)    
 
 @app.post("/api/orders")
 async def create_order(order: OrderCreate):
@@ -290,6 +317,9 @@ async def reset_panel(panel_number: int):
                 order.completed_at = datetime.utcnow()
             
             await db.commit()
+
+            # 👇 ДОБАВИТЬ ЭТУ СТРОКУ 👇
+            await notify_php_api_order_closed(active_orders.id)
         
         return {
             "status": "ok",
