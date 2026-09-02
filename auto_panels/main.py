@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Dict, Optional
 from fastapi import FastAPI, WebSocket, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware  #
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func, update
@@ -25,6 +26,17 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 app = FastAPI(title="AutoPanel Server", lifespan=lifespan)
+
+# =========================
+# НАСТРОЙКА CORS
+# =========================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Разрешаем запросы с любых адресов (идеально для локальной сети пилотника)
+    allow_credentials=True,
+    allow_methods=["*"],  # Разрешаем все методы: GET, POST, PUT, DELETE, OPTIONS
+    allow_headers=["*"],  # Разрешаем все заголовки
+)
 
 class OrderCreate(BaseModel):
     order_number: str
