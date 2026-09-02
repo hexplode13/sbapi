@@ -96,7 +96,7 @@ class OrderController extends Controller
         $orderId = (int)$params['id'];
 
         try {
-            $this->orders->close($orderId, true);
+            $this->orders->closeontab($orderId, true);
 
             $this->success([
                 'order' => $orderId,
