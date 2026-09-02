@@ -177,7 +177,7 @@ class OrderService
                 INSERT INTO my_orders
                     (outid, date, time, comment, status, point, uniq, date_start, time_start, token, cliname, cliphone)
                 VALUES
-                    (:outid, :date, :time, :comment, 0, :point, :uniq, :date_start, :time_start, :token, :cliname, : cliphone)
+                    (:outid, :date, :time, :comment, 0, :point, :uniq, :date_start, :time_start, :token, :cliname, :cliphone)
             ");
 
             $stmt->execute([
