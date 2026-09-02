@@ -329,6 +329,68 @@ class OrderService
         }
     }
 
+    public function closeontab(int $orderId, bool $onTable = false): void
+    {
+        $time = date('H:i:s');
+        $date = date('Y-m-d');
+
+        $this->db->beginTransaction();
+
+        try {
+            $stmt = $this->db->prepare("
+                UPDATE my_orders
+                SET status = 2
+                WHERE id = ( SELECT id FROM `my_orders` WHERE outid = ? ORDER BY id DESC LIMIT 1 )
+            ");
+            $stmt->execute([$orderId]);
+
+            $stmt = $this->db->prepare("
+                UPDATE my_orders_kuch
+                SET status = 2
+                WHERE id = ( SELECT id FROM `my_orders` WHERE outid = ? ORDER BY id DESC LIMIT 1 )
+            ");
+            $stmt->execute([$orderId]);
+
+            if ($onTable) {
+                $stmt = $this->db->prepare("
+                    UPDATE tables
+                    SET `order` = 0
+                    WHERE `order` = ( SELECT id FROM `my_orders` WHERE outid = ? ORDER BY id DESC LIMIT 1 )
+                ");
+                $stmt->execute([$orderId]);
+            }
+
+            $stmt = $this->db->prepare("
+                UPDATE my_orders_items
+                SET
+                    done = 1,
+                    end_time = :end_time,
+                    end_date = :end_date
+                WHERE `order` = ( SELECT id FROM `my_orders` WHERE outid = :outid ORDER BY id DESC LIMIT 1 )
+                  AND (
+                        end_time IS NULL
+                     OR end_date IS NULL
+                     OR end_time = ''
+                     OR end_date = ''
+                  )
+            ");
+
+            $stmt->execute([
+                'end_time' => $time,
+                'end_date' => $date,
+                'outid' => $orderId,
+            ]);
+
+            $this->db->commit();
+
+            $this->syncJobs->scheduleOrderTimesend($orderId);
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+
+            throw $e;
+        }
+    }
+
     public function update(int $orderId, bool $onTable = false): array
     {
         $time = date('H:i:s');

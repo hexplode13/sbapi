@@ -73,7 +73,7 @@ async def notify_php_api_order_closed(order_id: int):
     try:
         async with httpx.AsyncClient() as client:
             response = await client.patch(
-                f"{PHP_API_BASE_URL}/orders/{order_id}/close",
+                f"{PHP_API_BASE_URL}/orders/{order_id}/close-on-table",
                 timeout=5.0  # Таймаут 5 секунд, чтобы не вешать сервер, если PHP API недоступен
             )
             if response.status_code in [200, 204]:
