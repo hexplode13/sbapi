@@ -99,6 +99,9 @@ class OrderService
                 'id' => $shortId,
                 'status' => (int)($header['status'] ?? 0),
                 'kustatus' => isset($header['kustatus']) ? (int)$header['kustatus'] : null,
+                'panel' => isset($header['panel_number']) ? (int)$header['panel_number'] : null,
+                'client' => isset($header['cliname']) ? $header['cliname'] : null,
+                'phone' => isset($header['cliphone']) ? $header['cliphone'] : null,
                 'header' => [
                     'date' => $header['date'] ?? null,
                     'time' => $header['time'] ?? null,
