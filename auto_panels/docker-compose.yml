@@ -1,0 +1,15 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  autopanel:
+    build: .
+    container_name: autopanel_server
+    ports:
+      - "8000:8000"
+    volumes:
+      # Пробрасываем локальную папку ./db_data в папку /app/data внутри контейнера
+      - ./db_data:/app/data
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Moscow # Укажите ваш часовой пояс для корректных логов и времени

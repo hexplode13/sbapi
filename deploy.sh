@@ -5,6 +5,7 @@ set -e
 # Конфигурация
 # =========================
 APP_DIR="/var/www/html/newapi"
+PYTHON_APP_DIR="$APP_DIR/auto_panel"
 REPO_URL="https://github.com/hexplode13/sbapi.git"
 BRANCH="main"
 DB_USER="smartbar"
@@ -267,8 +268,33 @@ EOCRON
     chmod 644 "$AUTO_CRON"
     systemctl restart cron
 
-    log "=== УСТАНОВКА ЗАВЕРШЕНА ==="
+    #log "=== УСТАНОВКА ЗАВЕРШЕНА ==="
     log "Проверьте: curl http://$(hostname -I | awk '{print $1}')/newapi/test"
+
+    # =========================
+    # 12. Python Server (Docker)
+    # =========================
+    if [ -d "$PYTHON_APP_DIR" ] && [ -f "$PYTHON_APP_DIR/docker-compose.yml" ]; then
+        log "Настройка Python сервера (Docker)..."
+        
+        # Проверяем и устанавливаем Docker, если его нет
+        if ! command -v docker &> /dev/null; then
+            log "Установка Docker и Docker Compose..."
+            apt-get install -y docker.io docker-compose
+            systemctl enable --now docker
+        fi
+
+        # Собираем и запускаем контейнер
+        cd "$PYTHON_APP_DIR"
+        log "Сборка и запуск Python сервера..."
+        docker-compose up -d --build
+        
+        log "✅ Python сервер успешно запущен."
+    else
+        warn "Папка $PYTHON_APP_DIR или docker-compose.yml не найдены. Пропуск настройки Python."
+    fi
+
+    log "=== УСТАНОВКА ЗАВЕРШЕНА ==="
 
 elif [ "$MODE" = "update" ]; then
     log "=== ОБНОВЛЕНИЕ ==="
@@ -315,6 +341,18 @@ elif [ "$MODE" = "update" ]; then
     # Убираем зависшие процессы
     pkill -f timesend.php 2>/dev/null || true
     rm -f /tmp/smartbar-timesend.lock
+
+    #log "=== ОБНОВЛЕНИЕ ЗАВЕРШЕНО ==="
+        # =========================
+    # 6. Обновление Python Server (Docker)
+    # =========================
+    if [ -d "$PYTHON_APP_DIR" ] && [ -f "$PYTHON_APP_DIR/docker-compose.yml" ]; then
+        log "Обновление Python сервера (Docker)..."
+        cd "$PYTHON_APP_DIR"
+        # Ключ --build ОБЯЗАТЕЛЕН: он копирует новый main.py внутрь образа и перезапускает контейнер
+        docker-compose up -d --build
+        log "✅ Python сервер обновлен и перезапущен."
+    fi
 
     log "=== ОБНОВЛЕНИЕ ЗАВЕРШЕНО ==="
 

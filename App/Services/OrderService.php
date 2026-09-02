@@ -159,6 +159,8 @@ class OrderService
         $comment = (string)($data['comment'] ?? '');
         $token = (string)($data['token'] ?? '');
         $techCard = (int)($data['tc'] ?? 0);
+        $cliname = (string)($data['cliname'] ?? '');
+        $cliphone = (string)($data['cliphone'] ?? '');
 
         $startDate = date('Y-m-d');
         $startTime = date('H:i:s');
@@ -170,9 +172,9 @@ class OrderService
         try {
             $stmt = $this->db->prepare("
                 INSERT INTO my_orders
-                    (outid, date, time, comment, status, point, uniq, date_start, time_start, token)
+                    (outid, date, time, comment, status, point, uniq, date_start, time_start, token, cliname, cliphone)
                 VALUES
-                    (:outid, :date, :time, :comment, 0, :point, :uniq, :date_start, :time_start, :token)
+                    (:outid, :date, :time, :comment, 0, :point, :uniq, :date_start, :time_start, :token, :cliname, : cliphone)
             ");
 
             $stmt->execute([
@@ -185,6 +187,8 @@ class OrderService
                 'date_start' => $startDate,
                 'time_start' => $startTime,
                 'token' => $token,
+                'cliname' => $cliname,
+                'cliphone' => $cliphone,
             ]);
 
             $orderId = (int)$this->db->lastInsertId();
@@ -241,7 +245,7 @@ class OrderService
             $this->db->commit();
 
             // === ПОПЫТКА ОТПРАВКИ НА ПАНЕЛЬ ПРИ СОЗДАНИИ ===
-            $customerName = (string)($data['customer_name'] ?? $data['comment'] ?? 'Гость');
+            $customerName = (string)($data['cliname'] ?? $data['comment'] ?? 'Гость');
             $assignedPanel = $this->panelService->tryAssignAndSendOrder($outid, $customerName);
 
             if ($assignedPanel !== null) {
@@ -432,14 +436,14 @@ class OrderService
 
             // === ПОВТОРНАЯ ПРОВЕРКА ПАНЕЛИ ПРИ СТАТУСЕ "ГОТОВ" ===
             // Проверяем, не был ли заказ уже отправлен на панель
-            $checkStmt = $this->db->prepare("SELECT outid, panel_sent FROM my_orders WHERE id = ?");
+            $checkStmt = $this->db->prepare("SELECT outid, panel_sent, cliname FROM my_orders WHERE id = ?");
             $checkStmt->execute([$orderId]);
             $orderInfo = $checkStmt->fetch();
 
             if ($orderInfo && (int)$orderInfo['panel_sent'] === 0) {
                 // Заказ еще не на панели, пробуем снова
                 // Имя клиента можно взять из комментария или оставить дефолтное
-                $customerName = 'Готов к выдаче'; 
+                $customerName = (string)($orderInfo['cliname'] ?? 'Гость');//$orderInfo['panel_sent']'Готов к выдаче'; 
                 $assignedPanel = $this->panelService->tryAssignAndSendOrder((string)$orderInfo['outid'], $customerName);
 
                 if ($assignedPanel !== null) {
