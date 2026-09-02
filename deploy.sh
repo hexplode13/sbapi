@@ -5,7 +5,7 @@ set -e
 # Конфигурация
 # =========================
 APP_DIR="/var/www/html/newapi"
-PYTHON_APP_DIR="$APP_DIR/auto_panel" 
+PYTHON_APP_DIR="$APP_DIR/auto_panels" 
 REPO_URL="https://github.com/hexplode13/sbapi.git"
 BRANCH="main"
 DB_USER="smartbar"
