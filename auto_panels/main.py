@@ -149,7 +149,7 @@ async def handle_panel_message(panel_number: int, message: dict):
 
         # 👇 ДОБАВИТЬ ЭТУ СТРОКУ 👇
         if new_status == OrderStatus.COMPLETED:
-            await notify_php_api_order_closed(order.id)    
+            await notify_php_api_order_closed(int(order.order_number))    
 
 @app.post("/api/orders")
 async def create_order(order: OrderCreate):
@@ -299,28 +299,36 @@ async def reset_panel(panel_number: int):
         
         # Также обновляем заказ в БД если он есть
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
+            # 1. Сначала находим саму панель, чтобы получить её panel_id
+            panel_result = await db.execute(select(Panel).where(Panel.panel_number == panel_number))
+            panel = panel_result.scalar_one_or_none()
+            
+            if not panel:
+                raise HTTPException(status_code=404, detail="Панель не найдена")
+
+            # 2. Ищем активные заказы на этой панели
+            active_statuses = [OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED]
+            order_result = await db.execute(
                 select(Order)
-                .where(Order.panel_id == (
-                    select(Panel.id).where(Panel.panel_number == panel_number)
-                ))
-                .where(Order.status.in_([
-                    OrderStatus.ASSIGNED, 
-                    OrderStatus.WAITING_WEIGHT, 
-                    OrderStatus.WEIGHT_DETECTED
-                ]))
+                .where(Order.panel_id == panel.id)
+                .where(Order.status.in_(active_statuses))
+                .order_by(Order.created_at.desc()) # На случай если их несколько, берем самый свежий
+                .limit(1)
             )
-            active_orders = result.scalars().all()
-            
-            for order in active_orders:
-                order.status = OrderStatus.COMPLETED
-                order.completed_at = datetime.utcnow()
-            
+            active_order = order_result.scalar_one_or_none()
+
+            # 3. Если активных заказов нет, просто возвращаем успех, не дергая PHP API
+            if not active_order:
+                return {"status": "ok", "message": f"Панель #{panel_number} уже свободна"}
+
+            # 4. Закрываем найденный заказ
+            active_order.status = OrderStatus.COMPLETED
+            active_order.completed_at = datetime.utcnow()
             await db.commit()
 
-            # 👇 ДОБАВИТЬ ЭТУ СТРОКУ 👇
-            await notify_php_api_order_closed(Order.id)
-        
+            # 5. Уведомляем PHP API только о реальном ID заказа
+            await notify_php_api_order_closed(int(active_order.order_number))
+            
         return {
             "status": "ok",
             "message": f"Команда сброса отправлена на Panel #{panel_number}",
