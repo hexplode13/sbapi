@@ -77,7 +77,7 @@ async def notify_php_api_order_closed(order_id: int):
                 timeout=5.0  # Таймаут 5 секунд, чтобы не вешать сервер, если PHP API недоступен
             )
             if response.status_code in [200, 204]:
-                print(f"✅ Заказ #{order_id} успешно закрыт в PHP API")
+                print(f"✅ Заказ #{order_id} успешно закрыт в PHP API | {response.text}")
             else:
                 print(f"⚠️ PHP API вернул ошибку для заказа #{order_id}: HTTP {response.status_code} | {response.text}")
     except httpx.RequestError as e:
@@ -319,7 +319,7 @@ async def reset_panel(panel_number: int):
             await db.commit()
 
             # 👇 ДОБАВИТЬ ЭТУ СТРОКУ 👇
-            await notify_php_api_order_closed(active_orders.id)
+            await notify_php_api_order_closed(Order.id)
         
         return {
             "status": "ok",
