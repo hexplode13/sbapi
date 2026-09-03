@@ -307,31 +307,35 @@ elif [ "$MODE" = "update" ]; then
     log "=== ОБНОВЛЕНИЕ ==="
 
     if [ ! -d "$APP_DIR/.git" ]; then
-        err "Директория $APP_DIR не является git-репозиторием. Сначала выполните: sudo bash deploy.sh install"
+        err "Директория $APP_DIR не является git-_repo. Сначала выполните: sudo bash deploy.sh install"
     fi
 
     cd "$APP_DIR"
 
-    # 1. Сохраняем локальные изменения конфига
-    log "Обновление из репозитория..."
-    git stash --include-untracked 2>/dev/null || true
-    git pull origin "$BRANCH"
-    git stash pop 2>/dev/null || true
+    # 1. Получаем свежие данные с сервера
+    log "Получение обновлений из репозитория..."
+    git fetch origin "$BRANCH"
 
-    # 2. Composer
-    log "Обновление зависимостей..."
+    # 2. Жестко приводим все отслеживаемые файлы к состоянию репозитория.
+    # Это автоматически убирает все "Changes not staged" и локальные правки в коде.
+    # Файлы из .gitignore (например, config.php) при этом НЕ затрагиваются!
+    log "Синхронизация файлов (сброс локальных изменений кода)..."
+    git reset --hard "origin/$BRANCH"
+
+    # 3. Composer (обновит зависимости и создаст/обновит composer.lock)
+    log "Обновление зависимостей Composer..."
     composer install --no-dev --optimize-autoloader --quiet 2>/dev/null || true
 
-    # 3. Миграции
-    log "Применение новых миграций..."
+    # 4. Миграции БД (безопасно, так как используют IF NOT EXISTS или игнорируют ошибки)
+    log "Применение миграций БД..."
     for migration in "$APP_DIR"/database/migrations/*.sql; do
         if [ -f "$migration" ]; then
             mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$migration" 2>/dev/null || true
         fi
     done
 
-    # 4. Права
-    log "Обновление прав..."
+    # 5. Права доступа
+    log "Обновление прав доступа..."
     mkdir -p "$APP_DIR/storage/logs"
     chown -R www-data:www-data "$APP_DIR"
     find "$APP_DIR" -type d -exec chmod 755 {} \;
@@ -339,19 +343,17 @@ elif [ "$MODE" = "update" ]; then
     chmod -R 775 "$APP_DIR/storage"
     chmod +x "$APP_DIR/bin/timesend.php"
 
-    # 5. Перезапуск сервисов
+    # 6. Перезапуск сервисов и очистка зависших блокировок
     log "Перезапуск сервисов..."
     systemctl reload php${PHP_VERSION}-fpm
     nginx -t && systemctl reload nginx
     systemctl restart cron
 
-    # Убираем зависшие процессы
     pkill -f timesend.php 2>/dev/null || true
     rm -f /tmp/smartbar-timesend.lock
 
-    #log "=== ОБНОВЛЕНИЕ ЗАВЕРШЕНО ==="
-        # =========================
-    # 6. Обновление Python Server (Docker)
+    # =========================
+    # 7. Обновление Python Server (Docker)
     # =========================
     if [ -d "$PYTHON_APP_DIR" ] && [ -f "$PYTHON_APP_DIR/docker-compose.yml" ]; then
         log "Обновление Python сервера (Docker)..."
@@ -359,6 +361,8 @@ elif [ "$MODE" = "update" ]; then
         # Ключ --build ОБЯЗАТЕЛЕН: он копирует новый main.py внутрь образа и перезапускает контейнер
         docker-compose up -d --build
         log "✅ Python сервер обновлен и перезапущен."
+        # Возвращаемся в основную папку
+        cd "$APP_DIR"
     fi
 
     log "=== ОБНОВЛЕНИЕ ЗАВЕРШЕНО ==="
