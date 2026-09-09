@@ -89,7 +89,7 @@ class OrderService
         foreach ($headers as $header) {
             $outid = (string)($header['outid'] ?? '');
 
-            $shortId = strlen($outid) > 3
+            $shortId = strlen($outid) > 3 && substr($outid,0,1) != ':'
                 ? substr($outid, -3)
                 : $outid;
 
