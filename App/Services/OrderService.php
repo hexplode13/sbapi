@@ -145,6 +145,32 @@ class OrderService
         return $items;
     }
 
+    private function getIDByOrder(string $orderId): int
+    {
+        if (!$orderIds) {
+            return 0;
+        }
+
+        $stmt = $this->db->prepare("
+            SELECT
+                id
+            FROM my_orders
+            WHERE outid = :outid
+        ");
+
+        $stmt->execute([
+            'outid' => $orderId,
+        ]);
+
+        $id = 0;
+
+        foreach ($stmt->fetchAll() as $item) {
+            $id = (int)$item['id'];
+        }
+
+        return $id;
+    }
+
     public function create(array $data): array
     {
         if (!isset($data['date'], $data['time'], $data['id'], $data['items']) || !is_array($data['items'])) {
@@ -267,7 +293,7 @@ class OrderService
         }
     }
 
-    public function close(string $orderId, bool $onTable = false): void
+    public function close(int $orderId, bool $onTable = false): void
     {
         $time = date('H:i:s');
         $date = date('Y-m-d');
@@ -383,7 +409,7 @@ class OrderService
 
             $this->db->commit();
 
-            $this->syncJobs->scheduleOrderTimesend($orderId);
+            $this->syncJobs->scheduleOrderTimesend($this->getIDByOrder($orderId));
         } catch (Throwable $e) {
             $this->db->rollBack();
 
@@ -391,7 +417,7 @@ class OrderService
         }
     }
 
-    public function update(string $orderId, bool $onTable = false): array
+    public function update(int $orderId, bool $onTable = false): array
     {
         $time = date('H:i:s');
         $date = date('Y-m-d');
@@ -592,7 +618,7 @@ class OrderService
         ]);
     }
 
-    public function closeKuch(string $orderId): void
+    public function closeKuch(int $orderId): void
     {
         $this->db->beginTransaction();
 

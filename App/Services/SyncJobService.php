@@ -16,7 +16,7 @@ class SyncJobService
         $this->db = Database::pdo();
     }
 
-    public function scheduleOrderTimesend(string $orderId): void
+    public function scheduleOrderTimesend(int $orderId): void
     {
         $stmt = $this->db->prepare("
             SELECT
