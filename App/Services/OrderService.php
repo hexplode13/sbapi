@@ -267,7 +267,7 @@ class OrderService
         }
     }
 
-    public function close(int $orderId, bool $onTable = false): void
+    public function close(string $orderId, bool $onTable = false): void
     {
         $time = date('H:i:s');
         $date = date('Y-m-d');
@@ -329,7 +329,7 @@ class OrderService
         }
     }
 
-    public function closeontab(int $orderId, bool $onTable = false): void
+    public function closeontab(string $orderId, bool $onTable = false): void
     {
         $time = date('H:i:s');
         $date = date('Y-m-d');
@@ -592,7 +592,7 @@ class OrderService
         ]);
     }
 
-    public function closeKuch(int $orderId): void
+    public function closeKuch(string $orderId): void
     {
         $this->db->beginTransaction();
 

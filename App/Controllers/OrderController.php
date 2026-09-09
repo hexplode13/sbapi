@@ -77,7 +77,7 @@ class OrderController extends Controller
 
     public function close(Request $request, array $params): void
     {
-        $orderId = (int)$params['id'];
+        $orderId = (string)$params['id'];
 
         try {
             $this->orders->close($orderId, false);
@@ -93,7 +93,7 @@ class OrderController extends Controller
 
     public function closeOnTable(Request $request, array $params): void
     {
-        $orderId = (int)$params['id'];
+        $orderId = (string)$params['id'];
 
         try {
             $this->orders->closeontab($orderId, true); 
@@ -109,7 +109,7 @@ class OrderController extends Controller
 
     public function update(Request $request, array $params): void
     {
-        $orderId = $params['id'];
+        $orderId = (string)$params['id'];
 
         try {
             $this->orders->update($orderId, false);
@@ -125,7 +125,7 @@ class OrderController extends Controller
 
     public function updateOnTable(Request $request, array $params): void
     {
-        $orderId = (int)$params['id'];
+        $orderId = (string)$params['id'];
 
         try {
             $result = $this->orders->update($orderId, true);
@@ -171,7 +171,7 @@ class OrderController extends Controller
 
     public function closeKuch(Request $request, array $params): void
     {
-        $orderId = (int)$params['id'];
+        $orderId = (string)$params['id'];
 
         try {
             $this->orders->closeKuch($orderId);
