@@ -391,7 +391,7 @@ class OrderService
         }
     }
 
-    public function update(int $orderId, bool $onTable = false): array
+    public function update(string $orderId, bool $onTable = false): array
     {
         $time = date('H:i:s');
         $date = date('Y-m-d');

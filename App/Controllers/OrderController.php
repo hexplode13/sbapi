@@ -109,7 +109,7 @@ class OrderController extends Controller
 
     public function update(Request $request, array $params): void
     {
-        $orderId = (int)$params['id'];
+        $orderId = $params['id'];
 
         try {
             $this->orders->update($orderId, false);
