@@ -229,6 +229,12 @@ async def list_panels():
         panels = result.scalars().all()
         data = []
         for p in panels:
+            # Находим первый подходящий заказ
+            active_order = next((
+                o for o in p.orders 
+                if o.status in [OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED]
+            ), None) # None, если заказов нет
+
             active = len([
                 o for o in p.orders 
                 if o.status in [OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED]
@@ -238,7 +244,8 @@ async def list_panels():
                 "name": p.name,
                 "is_online": p.is_online,
                 "last_seen": p.last_seen.isoformat() if p.last_seen else None,
-                "active_orders": active
+                "active_orders": active,
+                "active_order_number": active_order.order_number if active_order else None 
             })
         return data
 
