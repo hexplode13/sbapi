@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Core\Database;
 use PDO;
 use RuntimeException;
+use Exception;
 
 class OrderService
 {
@@ -110,7 +111,91 @@ class OrderService
             ];
         }
 
+        try{
+            $this->checkPanels();
+        }catch (\Throwable $e){
+            error_log($e->getMessage());
+        }
+
         return $orders;
+    }
+
+    private function checkPanels()
+    {
+        $panelUrl = 'http://192.168.0.213:8000/';
+        $url = $panelUrl . 'api/panels';
+
+        $ch = curl_init($url);
+        if ($ch === false) {
+            throw new RuntimeException('Cannot init cURL for getFreePanels');
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 5,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_HTTPHEADER => ['Accept: application/json'],
+        ]);
+
+        $response = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        if ($errno !== 0) {
+            throw new RuntimeException("cURL error: {$error}");
+        }
+
+        if ($httpCode !== 200) {
+            throw new RuntimeException("HTTP {$httpCode}, body: " . (is_string($response) ? $response : ''));
+        }
+
+        if (!$response) {
+            return [];
+        }
+
+        $data = json_decode($response, true);
+
+        if (!is_array($data)) { $data = []; }
+
+        $chkpanel = [];
+        foreach($data as $p){
+            $chkpanel[$p['panel_number']] = $p;
+        }
+
+        $sql = "
+            SELECT panel_number, id, outid, status
+            FROM (
+                SELECT
+                    o.panel_number,
+                    o.id,
+                    o.outid,
+                    CASE WHEN o.date = m.max_date THEN o.status ELSE 2 END AS status,
+                    ROW_NUMBER() OVER (PARTITION BY o.panel_number ORDER BY o.id DESC) AS rn
+                FROM my_orders o
+                CROSS JOIN (SELECT MAX(date) AS max_date FROM my_orders) m
+                WHERE o.panel_number IS NOT NULL
+            ) t
+            WHERE rn = 1
+        ";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([]);
+
+        $headers = $stmt->fetchAll();
+
+        foreach($headers as $panel){
+            if($panel['status'] == 2 && $chkpanel[$panel['panel_number']]['active_orders'] > 0){
+                //RESET
+                try{
+                    $this->panelService->clearPanel($panel['panel_number']);
+                }catch (\Throwable $e){
+                    error_log($e->getMessage());
+                    error_log("URL: ".$url);
+                }
+            }
+        }
     }
 
     private function getItemsByOrders(array $orderIds, bool $kuchOnly = false): array
@@ -147,7 +232,7 @@ class OrderService
 
     private function getIDByOrder(string $orderId): int
     {
-        if (!$orderIds) {
+        if (!$orderId) {
             return 0;
         }
 

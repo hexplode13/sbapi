@@ -175,6 +175,56 @@ class PanelService
         return $result;
     }
 
+    public function clearPanel(int $panelNumber): bool
+    {
+        $url = $this->baseUrl . "/api/panels/$panelNumber/reset";
+        $payload = json_encode([
+            'panel_number' => $panelNumber,
+        ], JSON_UNESCAPED_UNICODE);
+
+        $this->log("POST /api/panels/$panelNumber/reset payload: {$payload}");
+
+        $ch = curl_init($url);
+        if ($ch === false) {
+            throw new RuntimeException('Cannot init cURL for sendOrderToPanel');
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Accept: application/json',
+            ],
+        ]);
+
+        $response = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        $this->log("POST /api/panels/$panelNumber/reset -> HTTP {$httpCode}, errno={$errno}, error={$error}, body: " . (is_string($response) ? $response : ''));
+
+        if ($errno !== 0) {
+            throw new RuntimeException("cURL error: {$error}");
+        }
+
+        if ($httpCode !== 200 && $httpCode !== 201) {
+            throw new RuntimeException("HTTP {$httpCode}, body: " . (is_string($response) ? $response : ''));
+        }
+
+        $data = json_decode($response, true);
+        $result = ($data['status'] ?? '') === 'ok';
+
+        $this->log("Send result: " . ($result ? 'OK' : 'FAILED'));
+
+        return $result;
+    }
+
     /**
      * Сохраняет факт отправки в БД
      */
