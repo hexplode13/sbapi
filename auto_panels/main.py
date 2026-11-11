@@ -1,420 +1,291 @@
-import httpx
 import asyncio
+import anyio
 import json
+from enum import Enum
+import logging
 import os
-from contextlib import asynccontextmanager
+import secrets
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
-from typing import Dict, Optional
-from fastapi import FastAPI, WebSocket, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware  #
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-from sqlalchemy import select, func, update
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from typing import Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, Response
+from pydantic import BaseModel, Field
+from pathlib import Path
 
-from models import Panel, Order, OrderStatus
-from database import AsyncSessionLocal, init_db
+class OrderStatus(str, Enum):
+    QUEUED = 'queued'
+    ASSIGNED = 'assigned'
+    WAITING_WEIGHT = 'waiting_weight'
+    WEIGHT_DETECTED = 'weight_detected'
+    COMPLETED = 'completed'
+    CANCELLED = 'cancelled'
 
-active_connections: Dict[int, WebSocket] = {}
-order_queue: asyncio.Queue = asyncio.Queue()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+log = logging.getLogger('autopanel')
+active_connections = {}
+panel_runtime = {}
+state_lock = asyncio.Lock()
+ACTIVE = (OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED)
+
+DATA_DIR = Path(os.getenv('DB_DIR', '/app/data'))
+panels = {}
+
+def save_panel(number, panel):
+    path = DATA_DIR / f'panel-{number}.json'
+    temporary = path.with_suffix('.tmp')
+    with temporary.open('w', encoding='utf-8') as stream:
+        json.dump(panel, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+    panels[number] = panel
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    task = asyncio.create_task(assign_orders_loop())
+async def lifespan(app):
+    global state_lock
+    state_lock = asyncio.Lock()
+    active_connections.clear()
+    panel_runtime.clear()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    panels.clear()
+    for number in range(1, 25):
+        path = DATA_DIR / f'panel-{number}.json'
+        if path.exists():
+            panels[number] = json.loads(path.read_text(encoding='utf-8'))
+    log.info('server_start pid=%s', os.getpid())
     yield
-    task.cancel()
+    log.info('server_stop')
 
-app = FastAPI(title="AutoPanel Server", lifespan=lifespan)
+app = FastAPI(title='AutoPanel Server 5.12', lifespan=lifespan)
 
-# =========================
-# НАСТРОЙКА CORS
-# =========================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Разрешаем запросы с любых адресов (идеально для локальной сети пилотника)
-    allow_credentials=True,
-    allow_methods=["*"],  # Разрешаем все методы: GET, POST, PUT, DELETE, OPTIONS
-    allow_headers=["*"],  # Разрешаем все заголовки
-)
+@app.middleware('http')
+async def auth(request: Request, call_next):
+    password = os.getenv('ADMIN_PASSWORD', '')
+    if password:
+        import base64
+        expected = 'Basic ' + base64.b64encode((os.getenv('ADMIN_USER', 'admin') + ':' + password).encode()).decode()
+        if not secrets.compare_digest(request.headers.get('authorization', ''), expected):
+            return Response(status_code=401, headers={'WWW-Authenticate': 'Basic realm="AutoPanel"'})
+    return await call_next(request)
 
 class OrderCreate(BaseModel):
-    order_number: str
-    customer_name: str
-    panel_number: Optional[int] = None
+    order_number: str = Field(min_length=1, max_length=50)
+    customer_name: str = Field(min_length=1, max_length=100)
+    panel_number: Optional[int] = Field(default=None, ge=1, le=24)
 
-async def send_order_to_panel(order: Order):
-    if not order.panel:
-        return
-    panel_number = order.panel.panel_number
-    ws = active_connections.get(panel_number)
+def active_order(number):
+    order = panels.get(number, {}).get('order')
+    return order if order and order['status'] in ACTIVE else None
+
+async def send(number, payload):
+    ws = active_connections.get(number)
     if not ws:
-        print(f"⚠️ Panel #{panel_number} не онлайн")
-        return
+        return False
     try:
-        await ws.send_text(json.dumps({
-            "id": order.id,
-            "order_number": order.order_number,
-            "name": order.customer_name,
-            "status": "wait"
-        }))
-        print(f"📤 Заказ #{order.id} → Panel #{panel_number}")
-    except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
+        await asyncio.wait_for(ws.send_json(payload), timeout=3)
+        return True
+    except Exception:
+        log.exception('send_failed panel=%s', number)
+        panel_runtime.get(number, {})['ready'] = False
+        with suppress(Exception):
+            await ws.close(code=1011)
+        return False
 
-# =========================
-# УВЕДОМЛЕНИЕ PHP API
-# =========================
-PHP_API_BASE_URL = "http://192.168.0.213/newapi"
+async def deliver(number, order):
+    ok = await send(number, dict(id=order['id'], order_number=order['order_number'], name=order['customer_name'], status='wait'))
+    log.info('order_delivery panel=%s order=%s sent=%s', number, order['id'], ok)
+    return ok
 
-async def notify_php_api_order_closed(order_id: int):
-    """Отправляет PATCH запрос в основной API о закрытии заказа"""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.patch(
-                f"{PHP_API_BASE_URL}/orders/{order_id}/close-on-table",
-                timeout=5.0  # Таймаут 5 секунд, чтобы не вешать сервер, если PHP API недоступен
-            )
-            if response.status_code in [200, 204]:
-                print(f"✅ Заказ #{order_id} успешно закрыт в PHP API | {response.text}")
-            else:
-                print(f"⚠️ PHP API вернул ошибку для заказа #{order_id}: HTTP {response.status_code} | {response.text}")
-    except httpx.RequestError as e:
-        print(f"❌ Не удалось соединиться с PHP API для заказа #{order_id}: {e}")
-    except Exception as e:
-        print(f"❌ Неожиданная ошибка при уведомлении PHP API (заказ #{order_id}): {e}")
-
-@app.websocket("/ws/panel/{panel_number}")
+@app.websocket('/ws/panel/{panel_number}')
 async def panel_websocket(websocket: WebSocket, panel_number: int):
+    key = os.getenv('PANEL_API_KEY', '')
+    if not 1 <= panel_number <= 24 or (key and not secrets.compare_digest(websocket.headers.get('x-panel-key', ''), key)):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Panel).where(Panel.panel_number == panel_number))
-        panel = result.scalar_one_or_none()
-        if not panel:
-            panel = Panel(panel_number=panel_number, is_online=True, last_seen=datetime.utcnow())
-            db.add(panel)
-        else:
-            panel.is_online = True
-            panel.last_seen = datetime.utcnow()
-        await db.commit()
-
-    active_connections[panel_number] = websocket
-    print(f"✓ Panel #{panel_number} подключена. Онлайн: {len(active_connections)}")
-
+    async with state_lock:
+        previous = active_connections.get(panel_number)
+        active_connections[panel_number] = websocket
+        panel_runtime[panel_number] = {'ready': False, 'state': 'connecting', 'diagnostics': {}}
+        panel = panels.get(panel_number, {'name': None, 'order': None})
+        try:
+            save_panel(panel_number, dict(panel, last_seen=datetime.utcnow().isoformat() + 'Z'))
+        except OSError:
+            active_connections.pop(panel_number, None)
+            panel_runtime.pop(panel_number, None)
+            log.exception('panel_storage_failed panel=%s', panel_number)
+            await websocket.close(code=1011)
+            return
+        if previous:
+            with suppress(Exception):
+                await previous.close(code=1000)
+    log.info('panel_connected panel=%s peer=%s', panel_number, websocket.client)
     try:
         while True:
-            data = await websocket.receive_text()
+            raw = await websocket.receive_text()
             try:
-                message = json.loads(data)
-                await handle_panel_message(panel_number, message)
-            except json.JSONDecodeError:
-                print(f"Invalid JSON: {data}")
-    except WebSocketDisconnect:
-        active_connections.pop(panel_number, None)
-        async with AsyncSessionLocal() as db:
-            await db.execute(
-                update(Panel).where(Panel.panel_number == panel_number)
-                .values(is_online=False, last_seen=datetime.utcnow())
-            )
-            await db.commit()
-        print(f"✗ Panel #{panel_number} отключена")
-
-async def handle_panel_message(panel_number: int, message: dict):
-    status = message.get("status")
-    order_id = message.get("order_id")
-    if not order_id or not status:
-        return
-
-    status_map = {
-        "waiting_for_weight": OrderStatus.WAITING_WEIGHT,
-        "weight_detected": OrderStatus.WEIGHT_DETECTED,
-        "completed": OrderStatus.COMPLETED,
-        "done": OrderStatus.COMPLETED,
-        "order_taken": OrderStatus.WEIGHT_DETECTED,
-    }
-    new_status = status_map.get(status)
-    if not new_status:
-        return
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Order).where(Order.id == order_id))
-        order = result.scalar_one_or_none()
-        if order:
-            order.status = new_status
-            if new_status == OrderStatus.COMPLETED:
-                order.completed_at = datetime.utcnow()
-            await db.commit()
-            print(f"Panel #{panel_number}: Заказ #{order_id} → {status}")
-
-        # 👇 ДОБАВИТЬ ЭТУ СТРОКУ 👇
-        if new_status == OrderStatus.COMPLETED:
-            await notify_php_api_order_closed(int(order.order_number))    
-
-@app.post("/api/orders")
-async def create_order(order: OrderCreate):
-    try:
-        async with AsyncSessionLocal() as db:
-            new_order = Order(
-                order_number=order.order_number,
-                customer_name=order.customer_name,
-                status=OrderStatus.QUEUED
-            )
-            if order.panel_number:
-                result = await db.execute(select(Panel).where(Panel.panel_number == order.panel_number))
-                panel = result.scalar_one_or_none()
-                if panel and panel.is_online:
-                    new_order.panel_id = panel.id
-                    new_order.status = OrderStatus.ASSIGNED
-                    new_order.assigned_at = datetime.utcnow()
-            
-            db.add(new_order)
-            await db.commit()
-            await db.refresh(new_order)
-
-            if new_order.panel_id:
-                result = await db.execute(select(Panel).where(Panel.id == new_order.panel_id))
-                new_order.panel = result.scalar_one_or_none()
-
-            order_id = new_order.id
-            assigned_panel = new_order.panel.panel_number if new_order.panel else None
-
-        if assigned_panel:
-            await send_order_to_panel(new_order)
-        else:
-            await order_queue.put(order_id)
-
-        return {
-            "status": "ok",
-            "order_id": order_id,
-            "panel_number": assigned_panel,
-            "message": "Заказ создан"
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/orders")
-async def list_orders(status: Optional[str] = None, limit: int = Query(default=50, le=100)):
-    async with AsyncSessionLocal() as db:
-        query = (
-            select(Order)
-            .options(selectinload(Order.panel))
-            .order_by(Order.created_at.desc())
-            .limit(limit)
-        )
-        if status:
-            query = query.where(Order.status == status)
-        
-        result = await db.execute(query)
-        orders = result.scalars().all()
-        return [{
-            "id": o.id,
-            "order_number": o.order_number,
-            "customer_name": o.customer_name,
-            "status": o.status,
-            "panel_number": o.panel.panel_number if o.panel else None,
-            "created_at": o.created_at.isoformat(),
-        } for o in orders]
-
-@app.get("/api/panels")
-async def list_panels():
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Panel)
-            .options(selectinload(Panel.orders))
-            .order_by(Panel.panel_number)
-        )
-        panels = result.scalars().all()
-        data = []
-        for p in panels:
-            # Находим первый подходящий заказ
-            active_order = next((
-                o for o in p.orders 
-                if o.status in [OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED]
-            ), None) # None, если заказов нет
-
-            active = len([
-                o for o in p.orders 
-                if o.status in [OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED]
-            ])
-            data.append({
-                "panel_number": p.panel_number,
-                "name": p.name,
-                "is_online": p.is_online,
-                "last_seen": p.last_seen.isoformat() if p.last_seen else None,
-                "active_orders": active,
-                "active_order_number": active_order.order_number if active_order else None 
-            })
-        return data
-
-# === СПИСОК СВОБОДНЫХ ПАНЕЛЕЙ ===
-@app.get("/api/panels/free")
-async def get_free_panels():
-    async with AsyncSessionLocal() as db:
-        # Загружаем все панели вместе с их заказами
-        result = await db.execute(
-            select(Panel)
-            .options(selectinload(Panel.orders))
-            .order_by(Panel.panel_number)
-        )
-        panels = result.scalars().all()
-        
-        free_panels = []
-        for p in panels:
-            # Считаем активные заказы (те, что еще не завершены)
-            active_orders = [
-                o for o in p.orders 
-                if o.status in [
-                    OrderStatus.ASSIGNED, 
-                    OrderStatus.WAITING_WEIGHT, 
-                    OrderStatus.WEIGHT_DETECTED,
-                    OrderStatus.QUEUED
-                ]
-            ]
-            
-            # Если активных заказов нет, панель свободна
-            if len(active_orders) == 0:
-                free_panels.append({
-                    "panel_number": p.panel_number,
-                    "name": p.name,
-                    "is_online": p.is_online,
-                    "last_seen": p.last_seen.isoformat() if p.last_seen else None,
-                    "status": "free"
-                })
-                
-        return {
-            "count": len(free_panels),
-            "free_panels": free_panels
-        }
-
-# === ПРИНУДИТЕЛЬНЫЙ СБРОС ПАНЕЛИ ===
-@app.post("/api/panels/{panel_number}/reset")
-async def reset_panel(panel_number: int):
-    """Отправка команды сброса на конкретную панель"""
-    ws = active_connections.get(panel_number)
-    
-    if not ws:
-        raise HTTPException(status_code=404, detail=f"Panel #{panel_number} не онлайн")
-    
-    try:
-        await ws.send_text(json.dumps({
-            "command": "reset",
-            "order_id": None
-        }))
-        
-        # Также обновляем заказ в БД если он есть
-        async with AsyncSessionLocal() as db:
-            # 1. Сначала находим саму панель, чтобы получить её panel_id
-            panel_result = await db.execute(select(Panel).where(Panel.panel_number == panel_number))
-            panel = panel_result.scalar_one_or_none()
-            
-            if not panel:
-                raise HTTPException(status_code=404, detail="Панель не найдена")
-
-            # 2. Ищем активные заказы на этой панели
-            active_statuses = [OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED]
-            order_result = await db.execute(
-                select(Order)
-                .where(Order.panel_id == panel.id)
-                .where(Order.status.in_(active_statuses))
-                .order_by(Order.created_at.desc()) # На случай если их несколько, берем самый свежий
-                .limit(1)
-            )
-            active_order = order_result.scalar_one_or_none()
-
-            # 3. Если активных заказов нет, просто возвращаем успех, не дергая PHP API
-            if not active_order:
-                return {"status": "ok", "message": f"Панель #{panel_number} уже свободна"}
-
-            # 4. Закрываем найденный заказ
-            active_order.status = OrderStatus.COMPLETED
-            active_order.completed_at = datetime.utcnow()
-            await db.commit()
-
-            # 5. Уведомляем PHP API только о реальном ID заказа
-            await notify_php_api_order_closed(int(active_order.order_number))
-            
-        return {
-            "status": "ok",
-            "message": f"Команда сброса отправлена на Panel #{panel_number}",
-            "orders_completed": len(active_orders)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/panels/{panel_number}/factory-reset")
-async def factory_reset_panel(panel_number: int):
-    """Полный сброс панели: стирание настроек и переход в портал WiFi"""
-    ws = active_connections.get(panel_number)
-    
-    if not ws:
-        raise HTTPException(status_code=404, detail=f"Panel #{panel_number} не онлайн")
-    
-    try:
-        await ws.send_text(json.dumps({
-            "command": "factory_reset"
-        }))
-        return {
-            "status": "ok",
-            "message": f"Команда полного сброса отправлена на Panel #{panel_number}. Устройство перезагрузится в режим настройки WiFi."
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-
-@app.get("/api/status")
-async def server_status():
-    return {
-        "mode": "sqlite",
-        "database": "SQLite (Docker Volume)",
-        "online_panels": list(active_connections.keys()),
-        "server_time": datetime.utcnow().isoformat()
-    }
-
-async def assign_orders_loop():
-    while True:
-        try:
-            order_id = await order_queue.get()
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(select(Order).where(Order.id == order_id))
-                order = result.scalar_one_or_none()
-                if not order or order.status != OrderStatus.QUEUED:
+                message = json.loads(raw)
+                if not isinstance(message, dict):
                     continue
-                
-                result = await db.execute(
-                    select(Panel).where(Panel.is_online == True).order_by(Panel.last_seen.desc())
-                )
-                panels = result.scalars().all()
-                
-                for panel in panels:
-                    res_count = await db.execute(
-                        select(func.count()).select_from(Order)
-                        .where(Order.panel_id == panel.id)
-                        .where(Order.status.in_([
-                            OrderStatus.ASSIGNED, OrderStatus.WAITING_WEIGHT, OrderStatus.WEIGHT_DETECTED
-                        ]))
-                    )
-                    active = res_count.scalar_one() or 0
-                    
-                    if active == 0:
-                        order.panel_id = panel.id
-                        order.status = OrderStatus.ASSIGNED
-                        order.assigned_at = datetime.utcnow()
-                        await db.commit()
-                        
-                        result = await db.execute(select(Panel).where(Panel.id == panel.id))
-                        order.panel = result.scalar_one_or_none()
-                        await send_order_to_panel(order)
-                        print(f"📦 Заказ #{order.id} назначен на Panel #{panel.panel_number}")
+                async with state_lock:
+                    if active_connections.get(panel_number) is not websocket:
                         break
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            await asyncio.sleep(1)
+                    await handle_panel_message(panel_number, message)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                log.warning('invalid_message panel=%s data=%r', panel_number, raw[:250])
+    except WebSocketDisconnect as exc:
+        log.info('panel_disconnected panel=%s code=%s', panel_number, exc.code)
+    except Exception:
+        log.exception('panel_connection_error panel=%s', panel_number)
+    finally:
+        with anyio.CancelScope(shield=True):
+            async with state_lock:
+                if active_connections.get(panel_number) is websocket:
+                    active_connections.pop(panel_number, None)
+                    panel_runtime.pop(panel_number, None)
 
+async def handle_panel_message(number, message):
+    runtime = panel_runtime[number]
+    status = message.get('status')
+    runtime['last_seen'] = datetime.utcnow().isoformat() + 'Z'
+    if not isinstance(status, str):
+        return
+    if status == 'heartbeat':
+        if message.get('sensor_ok') is False:
+            runtime['ready'] = False
+        runtime['diagnostics'] = {k: message.get(k) for k in ('uptime_ms', 'free_heap', 'min_heap', 'rssi', 'reset_reason', 'fw', 'sensor_ok', 'state')}
+        log.info('heartbeat panel=%s data=%s', number, runtime['diagnostics'])
+        return
+    log.info('panel_status panel=%s message=%s', number, message)
+    order = active_order(number)
+    if status == 'idle':
+        if runtime.get('reset_pending'):
+            if order:
+                update_order(number, order, OrderStatus.CANCELLED)
+            runtime.pop('reset_pending', None)
+            order = None
+        runtime.update(state='idle', ready=order is None and runtime.get('diagnostics', {}).get('sensor_ok') is not False)
+        if order and runtime.get('diagnostics', {}).get('sensor_ok') is not False:
+            update_order(number, order, OrderStatus.ASSIGNED)
+            await deliver(number, order)
+            return
+    elif status == 'ota_ack':
+        runtime.update(ready=False, state='ota')
+    elif status in ('ota_rejected_busy', 'ota_rejected_storage'):
+        runtime.update(ready=False, state=status)
+    elif status == 'factory_reset_ack':
+        runtime.update(ready=False, state='setup')
+        if order:
+            update_order(number, order, OrderStatus.CANCELLED)
+    elif status == 'sensor_or_order_error':
+        runtime.update(ready=False, state='sensor_error')
+    else:
+        order_id = message.get('order_id')
+        if not order or type(order_id) is not int or order_id != order['id']:
+            return
+        transitions = {'waiting_for_weight': OrderStatus.WAITING_WEIGHT, 'weight_detected': OrderStatus.WEIGHT_DETECTED, 'completed': OrderStatus.COMPLETED, 'done': OrderStatus.COMPLETED, 'timeout_reset': OrderStatus.CANCELLED}
+        target = transitions.get(status)
+        ranks = {OrderStatus.ASSIGNED: 0, OrderStatus.WAITING_WEIGHT: 1, OrderStatus.WEIGHT_DETECTED: 2, OrderStatus.COMPLETED: 3, OrderStatus.CANCELLED: 3}
+        if target and ranks[target] >= ranks[order['status']]:
+            update_order(number, order, target)
+            runtime.update(ready=False, state=status)
+
+
+def update_order(number, order, status):
+    updated = dict(order, status=status)
+    if status not in ACTIVE:
+        updated['completed_at'] = datetime.utcnow().isoformat() + 'Z'
+    panel = dict(panels[number], order=updated, last_seen=panel_runtime[number]['last_seen'])
+    save_panel(number, panel)
+
+@app.post('/api/orders')
+async def create_order(order: OrderCreate):
+    async with state_lock:
+        candidates = [order.panel_number] if order.panel_number else sorted(active_connections)
+        number = next((n for n in candidates if n in active_connections
+                       and panel_runtime[n]['ready'] and not active_order(n)), None)
+        if number is None:
+            raise HTTPException(409, 'Нет свободной готовой панели. Заказ не сохранён')
+        next_id = max((p['order']['id'] for p in panels.values() if p.get('order')), default=0) + 1
+        item = dict(id=next_id, order_number=order.order_number, customer_name=order.customer_name,
+                    status=OrderStatus.ASSIGNED, panel_number=number,
+                    created_at=datetime.utcnow().isoformat() + 'Z')
+        previous = panels[number]
+        try:
+            save_panel(number, dict(previous, order=item))
+        except OSError:
+            log.exception('order_storage_failed panel=%s', number)
+            raise HTTPException(503, 'Не удалось записать состояние панели')
+        panel_runtime[number]['ready'] = False
+        if not await deliver(number, item):
+            save_panel(number, dict(previous, order=dict(item, status=OrderStatus.CANCELLED)))
+            raise HTTPException(503, 'Не удалось отправить заказ')
+        return dict(status='ok', order_id=item['id'], panel_number=number, message='Заказ назначен')
+
+@app.get('/api/orders')
+async def list_orders(status: Optional[OrderStatus] = None, limit: int = Query(50, ge=1, le=100)):
+    orders = [p['order'] for p in panels.values() if p.get('order')]
+    return sorted((o for o in orders if status is None or o['status'] == status),
+                  key=lambda o: o['id'], reverse=True)[:limit]
+
+@app.get('/api/panels')
+async def list_panels():
+    result = []
+    for number, panel in sorted(panels.items()):
+        runtime = panel_runtime.get(number, {})
+        result.append(dict(panel_number=number, name=panel['name'], is_online=number in active_connections,
+                           last_seen=runtime.get('last_seen', panel.get('last_seen')),
+                           active_orders=int(active_order(number) is not None),
+                           ready=runtime.get('ready', False), diagnostics=runtime.get('diagnostics', {})))
+    return result
+
+@app.get('/api/panels/free')
+async def free_panels():
+    panels = [p for p in await list_panels() if p['is_online'] and p['ready'] and not p['active_orders']]
+    return {'count': len(panels), 'free_panels': panels}
+
+@app.post('/api/panels/{panel_number}/ota', status_code=202)
+async def enter_ota(panel_number: int):
+    async with state_lock:
+        if panel_number not in active_connections:
+            raise HTTPException(404, 'Панель отключена')
+        runtime = panel_runtime[panel_number]
+        if not runtime.get('ready'):
+            raise HTTPException(409, 'Панель занята или ещё не готова')
+        # The old firmware does not implement enter_ota: do not reserve it forever.
+        if runtime.get('diagnostics', {}).get('fw') not in ('5.10', '5.11'):
+            raise HTTPException(409, 'Для перехода в OTA нужна прошивка 5.10 или 5.11')
+        if active_order(panel_number):
+            raise HTTPException(409, 'У панели есть активный заказ')
+        runtime.update(ready=False, state='ota_pending')
+        if not await send(panel_number, {'command': 'enter_ota'}):
+            raise HTTPException(503, 'Не удалось отправить команду')
+        return {'status': 'pending', 'message': 'Переход в OTA запрошен. После перезагрузки откройте http://IP_ПАНЕЛИ/update'}
+
+@app.post('/api/panels/{panel_number}/reset')
+async def reset_panel(panel_number: int):
+    async with state_lock:
+        if panel_number not in active_connections:
+            raise HTTPException(404, 'Панель отключена')
+        if not await send(panel_number, {'command': 'reset'}):
+            raise HTTPException(503, 'Не удалось отправить команду')
+        panel_runtime[panel_number].update(ready=False, reset_pending=True)
+        return {'status': 'ok', 'message': 'Сброс отправлен; ожидается подтверждение панели'}
+
+@app.post('/api/panels/{panel_number}/factory-reset')
+async def factory_reset_panel(panel_number: int):
+    async with state_lock:
+        if panel_number not in active_connections:
+            raise HTTPException(404, 'Панель отключена')
+        if not await send(panel_number, {'command': 'factory_reset'}):
+            raise HTTPException(503, 'Не удалось отправить команду')
+        panel_runtime[panel_number]['ready'] = False
+        return {'status': 'ok', 'message': 'Отправлена команда перехода в настройку'}
+
+@app.get('/api/status')
+async def server_status():
+    return {'mode': 'json', 'version': '5.12', 'online_panels': list(active_connections), 'server_time': datetime.utcnow().isoformat() + 'Z'}
 @app.get("/", response_class=HTMLResponse)
 async def admin_ui():
     return """
@@ -480,8 +351,12 @@ async def admin_ui():
                     document.getElementById('customer').value = '';
                     document.getElementById('order_num').value = '';
                     refresh();
+                } else {
+                    const err = await res.json();
+                    alert('Ошибка: ' + JSON.stringify(err.detail || err));
                 }
             }
+            function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
             async function refresh() {
                 try {
                     const sRes = await fetch('/api/status');
@@ -494,7 +369,7 @@ async def admin_ui():
                     document.getElementById('panels').innerHTML = panels.map(p => `
                         <div class="panel ${p.is_online ? 'online' : 'offline'}">
                             #${p.panel_number} ${p.is_online ? '🟢' : '⚫'}
-                            ${p.active_orders > 0 ? '<b> (' + p.active_orders + ')</b>' : ' (свободна)'}
+                            ${p.active_orders > 0 ? '<b> (' + p.active_orders + ')</b>' : (p.ready ? ' (готова)' : ' (не готова)')}<br><small>${esc(JSON.stringify(p.diagnostics))}</small>
                             ${p.active_orders > 0 ? `<button onclick="resetPanel(${p.panel_number})" style="background:#dc3545; color:white; padding: 4px 8px; font-size: 12px; margin-left: 8px; border:none; border-radius: 4px; cursor:pointer;">Сброс</button>` : ''}
                         </div>
                     `).join('');
@@ -504,8 +379,8 @@ async def admin_ui():
                     document.querySelector('#orders tbody').innerHTML = orders.map(o => `
                         <tr>
                             <td>${o.id}</td>
-                            <td>${o.order_number}</td>
-                            <td>${o.customer_name}</td>
+                            <td>${esc(o.order_number)}</td>
+                            <td>${esc(o.customer_name)}</td>
                             <td>${o.panel_number ? '#' + o.panel_number : '-'}</td>
                             <td class="status-${o.status}">${o.status}</td>
                             <td>${new Date(o.created_at).toLocaleTimeString()}</td>
@@ -519,7 +394,7 @@ async def admin_ui():
             setInterval(refresh, 1500);
             
             async function resetPanel(panelNumber) {
-                if (!confirm(`Сбросить занятость панели #${panelNumber}?\nТекущий заказ будет помечен как ВЫПОЛНЕННЫЙ.`)) {
+                if (!confirm(`Сбросить занятость панели #${panelNumber}?\nТекущий заказ будет отменён после подтверждения панели.`)) {
                     return;
                 }
                 try {
@@ -540,10 +415,3 @@ async def admin_ui():
     </html>
     """
 
-if __name__ == "__main__":
-    import uvicorn
-    print("=" * 60)
-    print("  AutoPanel Server (Docker + SQLite)")
-    print("  http://0.0.0.0:8000")
-    print("=" * 60)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
