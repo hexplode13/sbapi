@@ -21,32 +21,59 @@ git config --global --add safe.directory "$APP_DIR" 2>/dev/null
 
 log "=== Начало проверки обновлений ==="
 
-# Пытаемся сделать pull
-# Если есть конфликтующие файлы, мы принудительно сбрасываем их и тянем заново
-PULL_OUTPUT=$(git pull origin main 2>&1)
-PULL_EXIT=$?
-
-if [ $PULL_EXIT -ne 0 ]; then
-    # Если ошибка из-за локальных изменений, делаем hard reset этого файла и пробуем снова
-    if echo "$PULL_OUTPUT" | grep -q "would be overwritten"; then
-        log "Обнаружены локальные изменения в скрипте. Сбрасываем..."
-        git checkout -- bin/auto-update.sh
-        PULL_OUTPUT=$(git pull origin main 2>&1)
-        PULL_EXIT=$?
-    fi
-    
-    if [ $PULL_EXIT -ne 0 ]; then
-        log "Критическая ошибка git pull: $PULL_OUTPUT"
+# Разрешаем сброс локальных правок скрипта только на явно настроенных серверах.
+if [ -f /etc/smartbar/auto-update-discard-local-script ]; then
+    if [ "$(git symbolic-ref --quiet --short HEAD)" != main ]; then
+        log "Обновление остановлено: ожидается рабочая ветка main."
         exit 1
     fi
-fi
 
-# Проверяем, были ли реальные изменения
-if echo "$PULL_OUTPUT" | grep -q "Already up to date"; then
-    log "Обновлений нет."
-    exit 0
+    git fetch origin main >> "$LOG_FILE" 2>&1 || exit 1
+    OLD_SHA=$(git rev-parse HEAD) || exit 1
+    NEW_SHA=$(git rev-parse FETCH_HEAD) || exit 1
+
+    if [ "$OLD_SHA" = "$NEW_SHA" ]; then
+        log "Обновлений нет. HEAD=$OLD_SHA"
+        exit 0
+    fi
+
+    if ! git merge-base --is-ancestor "$OLD_SHA" "$NEW_SHA"; then
+        log "Обновление остановлено: fast-forward $OLD_SHA -> $NEW_SHA невозможен."
+        exit 1
+    fi
+
+    git restore --source="$OLD_SHA" --staged --worktree -- bin/auto-update.sh \
+        >> "$LOG_FILE" 2>&1 || exit 1
+    git merge --ff-only "$NEW_SHA" >> "$LOG_FILE" 2>&1 || exit 1
+    log "Код обновлён: $OLD_SHA -> $NEW_SHA"
 else
-    log "Найдены и применены обновления."
+    # Пытаемся сделать pull
+    # Если есть конфликтующие файлы, мы принудительно сбрасываем их и тянем заново
+    PULL_OUTPUT=$(git pull origin main 2>&1)
+    PULL_EXIT=$?
+
+    if [ $PULL_EXIT -ne 0 ]; then
+        # Если ошибка из-за локальных изменений, делаем hard reset этого файла и пробуем снова
+        if echo "$PULL_OUTPUT" | grep -q "would be overwritten"; then
+            log "Обнаружены локальные изменения в скрипте. Сбрасываем..."
+            git checkout -- bin/auto-update.sh
+            PULL_OUTPUT=$(git pull origin main 2>&1)
+            PULL_EXIT=$?
+        fi
+
+        if [ $PULL_EXIT -ne 0 ]; then
+            log "Критическая ошибка git pull: $PULL_OUTPUT"
+            exit 1
+        fi
+    fi
+
+    # Проверяем, были ли реальные изменения
+    if echo "$PULL_OUTPUT" | grep -q "Already up to date"; then
+        log "Обновлений нет."
+        exit 0
+    else
+        log "Найдены и применены обновления."
+    fi
 fi
 
 # Обновляем зависимости Composer

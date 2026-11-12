@@ -42,6 +42,22 @@ fi
 # Режим: install или update
 # =========================
 MODE="${1:-install}"
+INSTALL_TARGET="${2:-}"
+
+if [ "$MODE" = "install" ]; then
+    if [ -z "$INSTALL_TARGET" ]; then
+        if [ -t 0 ]; then
+            read -r -p "Тип сервера [prod/test] (по умолчанию prod): " INSTALL_TARGET || true
+        fi
+        INSTALL_TARGET="${INSTALL_TARGET:-prod}"
+    fi
+    case "$INSTALL_TARGET" in
+        prod|test) ;;
+        *) err "Тип сервера должен быть prod или test: sudo bash deploy.sh install [prod|test]" ;;
+    esac
+elif [ "$MODE" != "update" ] || [ "$#" -gt 1 ]; then
+    err "Использование: sudo bash deploy.sh install [prod|test] или sudo bash deploy.sh update"
+fi
 
 if [ "$MODE" = "install" ]; then
     log "=== ПЕРВИЧНАЯ УСТАНОВКА ==="
@@ -262,6 +278,14 @@ EOCRON
 
         # 11. Автообновление из git
     log "Настройка автообновления..."
+    AUTO_UPDATE_TEST_FLAG="/etc/smartbar/auto-update-discard-local-script"
+    if [ "$INSTALL_TARGET" = "test" ]; then
+        install -d -m 0755 /etc/smartbar
+        touch "$AUTO_UPDATE_TEST_FLAG"
+    else
+        rm -f "$AUTO_UPDATE_TEST_FLAG"
+    fi
+    log "Режим автообновления: $INSTALL_TARGET"
     AUTO_CRON="/etc/cron.d/smartbar-autoupdate"
     cat > "$AUTO_CRON" <<EOCRON
 SHELL=/bin/bash
@@ -368,5 +392,5 @@ elif [ "$MODE" = "update" ]; then
     log "=== ОБНОВЛЕНИЕ ЗАВЕРШЕНО ==="
 
 else
-    err "Неизвестный режим. Используйте: sudo bash deploy.sh [install|update]"
+    err "Неизвестный режим."
 fi

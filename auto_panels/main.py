@@ -57,7 +57,7 @@ async def lifespan(app):
     yield
     log.info('server_stop')
 
-app = FastAPI(title='AutoPanel Server 5.12', lifespan=lifespan)
+app = FastAPI(title='AutoPanel Server 5.13', lifespan=lifespan)
 
 @app.middleware('http')
 async def auth(request: Request, call_next):
@@ -73,6 +73,8 @@ class OrderCreate(BaseModel):
     order_number: str = Field(min_length=1, max_length=50)
     customer_name: str = Field(min_length=1, max_length=100)
     panel_number: Optional[int] = Field(default=None, ge=1, le=24)
+    smartbar_order_id: Optional[int] = Field(default=None, gt=0)
+
 
 def active_order(number):
     order = panels.get(number, {}).get('order')
@@ -197,7 +199,24 @@ def update_order(number, order, status):
     if status not in ACTIVE:
         updated['completed_at'] = datetime.utcnow().isoformat() + 'Z'
     panel = dict(panels[number], order=updated, last_seen=panel_runtime[number]['last_seen'])
+    if status == OrderStatus.COMPLETED and updated.get('smartbar_order_id'):
+        panel['pending_completions'] = [*panel.get('pending_completions', []), updated]
     save_panel(number, panel)
+
+@app.get('/api/completions')
+async def list_completions():
+    return [event for panel in panels.values()
+            for event in panel.get('pending_completions', [])]
+
+@app.post('/api/completions/{panel_number}/{order_id}/ack', status_code=204)
+async def acknowledge_completion(panel_number: int, order_id: int):
+    async with state_lock:
+        panel = panels.get(panel_number, {})
+        pending = panel.get('pending_completions', [])
+        remaining = [event for event in pending if event['id'] != order_id]
+        if len(remaining) != len(pending):
+            save_panel(panel_number, dict(panel, pending_completions=remaining))
+    return Response(status_code=204)
 
 @app.post('/api/orders')
 async def create_order(order: OrderCreate):
@@ -211,6 +230,8 @@ async def create_order(order: OrderCreate):
         item = dict(id=next_id, order_number=order.order_number, customer_name=order.customer_name,
                     status=OrderStatus.ASSIGNED, panel_number=number,
                     created_at=datetime.utcnow().isoformat() + 'Z')
+        if order.smartbar_order_id is not None:
+            item['smartbar_order_id'] = order.smartbar_order_id
         previous = panels[number]
         try:
             save_panel(number, dict(previous, order=item))
@@ -234,9 +255,11 @@ async def list_panels():
     result = []
     for number, panel in sorted(panels.items()):
         runtime = panel_runtime.get(number, {})
+        order = active_order(number)
         result.append(dict(panel_number=number, name=panel['name'], is_online=number in active_connections,
                            last_seen=runtime.get('last_seen', panel.get('last_seen')),
-                           active_orders=int(active_order(number) is not None),
+                           active_orders=int(order is not None),
+                           active_order_number=order['order_number'] if order else None,
                            ready=runtime.get('ready', False), diagnostics=runtime.get('diagnostics', {})))
     return result
 
@@ -285,7 +308,7 @@ async def factory_reset_panel(panel_number: int):
 
 @app.get('/api/status')
 async def server_status():
-    return {'mode': 'json', 'version': '5.12', 'online_panels': list(active_connections), 'server_time': datetime.utcnow().isoformat() + 'Z'}
+    return {'mode': 'json', 'version': '5.13', 'online_panels': list(active_connections), 'server_time': datetime.utcnow().isoformat() + 'Z'}
 @app.get("/", response_class=HTMLResponse)
 async def admin_ui():
     return """

@@ -8,6 +8,7 @@ use App\Core\Database;
 use PDO;
 use RuntimeException;
 use Exception;
+use Throwable;
 
 class OrderService
 {
@@ -24,6 +25,12 @@ class OrderService
 
     public function getOrders(bool $kuch = false, ?string $date = null, bool $onlyTables = false): array
     {
+        try {
+            $this->closeCompletedPanelOrders();
+        } catch (Throwable $e) {
+            error_log($e->getMessage());
+        }
+
         if ($date === null || $date === '') {
             $stmt = $this->db->query("SELECT MAX(date) AS d FROM my_orders LIMIT 1");
             $row = $stmt->fetch();
@@ -120,6 +127,34 @@ class OrderService
         return $orders;
     }
 
+    private function closeCompletedPanelOrders(): void
+    {
+        $events = $this->panelService->getCompletedOrders();
+        if ($events === []) {
+            return;
+        }
+
+        $lookup = $this->db->prepare(
+            "SELECT status, `table` FROM my_orders
+             WHERE id = ? AND panel_number = ? AND outid = ? AND panel_sent = 1"
+        );
+        foreach ($events as $event) {
+            $orderId = (int)$event['smartbar_order_id'];
+            $panelNumber = (int)$event['panel_number'];
+            $lookup->execute([$orderId, $panelNumber, (string)$event['order_number']]);
+            $order = $lookup->fetch();
+            $lookup->closeCursor();
+            if (!$order) {
+                continue;
+            }
+
+            if ((int)$order['status'] < 2) {
+                $this->close($orderId, (int)$order['table'] > 0, true);
+            }
+            $this->panelService->acknowledgeCompletion($panelNumber, (int)$event['id']);
+        }
+    }
+
     private function checkPanels()
     {
         $panelUrl = 'http://192.168.0.213:8000/';
@@ -186,7 +221,10 @@ class OrderService
         $headers = $stmt->fetchAll();
 
         foreach($headers as $panel){
-            if($panel['status'] == 2 && $chkpanel[$panel['panel_number']]['active_orders'] > 0){
+            $live = $chkpanel[$panel['panel_number']] ?? [];
+            if ((int)$panel['status'] === 2
+                && ($live['active_orders'] ?? 0) > 0
+                && ($live['active_order_number'] ?? null) === (string)$panel['outid']) {
                 //RESET
                 try{
                     $this->panelService->clearPanel($panel['panel_number']);
@@ -360,7 +398,7 @@ class OrderService
 
             // === ПОПЫТКА ОТПРАВКИ НА ПАНЕЛЬ ПРИ СОЗДАНИИ ===
             $customerName = (string)($data['cliname'] ?? $data['comment'] ?? 'Гость');
-            $assignedPanel = $this->panelService->tryAssignAndSendOrder($outid, $customerName);
+            $assignedPanel = $this->panelService->tryAssignAndSendOrder($outid, $customerName, $orderId);
 
             if ($assignedPanel !== null) {
                 $this->panelService->markOrderAsSent($orderId, $assignedPanel);
@@ -378,7 +416,7 @@ class OrderService
         }
     }
 
-    public function close(int $orderId, bool $onTable = false): void
+    public function close(int $orderId, bool $onTable = false, bool $onlyActive = false): void
     {
         $time = date('H:i:s');
         $date = date('Y-m-d');
@@ -389,9 +427,12 @@ class OrderService
             $stmt = $this->db->prepare("
                 UPDATE my_orders
                 SET status = 2
-                WHERE id = ?
-            ");
+                WHERE id = ?" . ($onlyActive ? " AND status < 2" : ""));
             $stmt->execute([$orderId]);
+            if ($onlyActive && $stmt->rowCount() === 0) {
+                $this->db->commit();
+                return;
+            }
 
             $stmt = $this->db->prepare("
                 UPDATE my_orders_kuch
@@ -434,7 +475,9 @@ class OrderService
 
             $this->syncJobs->scheduleOrderTimesend($orderId);
         } catch (Throwable $e) {
-            $this->db->rollBack();
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
 
             throw $e;
         }
@@ -620,7 +663,7 @@ class OrderService
                 // Заказ еще не на панели, пробуем снова
                 // Имя клиента можно взять из комментария или оставить дефолтное
                 $customerName = (string)($orderInfo['cliname'] ?? 'Гость');//$orderInfo['panel_sent']'Готов к выдаче'; 
-                $assignedPanel = $this->panelService->tryAssignAndSendOrder((string)$orderInfo['outid'], $customerName);
+                $assignedPanel = $this->panelService->tryAssignAndSendOrder((string)$orderInfo['outid'], $customerName, $orderId);
 
                 if ($assignedPanel !== null) {
                     $this->panelService->markOrderAsSent($orderId, $assignedPanel);

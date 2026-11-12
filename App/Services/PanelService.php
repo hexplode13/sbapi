@@ -45,7 +45,7 @@ class PanelService
      * Пытается найти свободную панель и отправить на нее заказ.
      * Возвращает номер панели, если успешно, или null, если свободных нет или ошибка.
      */
-    public function tryAssignAndSendOrder(string $orderNumber, string $customerName): ?int
+    public function tryAssignAndSendOrder(string $orderNumber, string $customerName, int $smartbarOrderId): ?int
     {
         $this->log("=== Start tryAssignAndSendOrder: order_number={$orderNumber}, customer={$customerName} ===");
 
@@ -66,7 +66,7 @@ class PanelService
             $this->log("Selected panel_number: {$panelNumber}");
 
             // 3. Отправляем заказ на панель
-            $success = $this->sendOrderToPanel($orderNumber, $customerName, $panelNumber);
+            $success = $this->sendOrderToPanel($orderNumber, $customerName, $panelNumber, $smartbarOrderId);
 
             if ($success) {
                 $this->log("Successfully sent to panel {$panelNumber}");
@@ -123,13 +123,14 @@ class PanelService
         return $data['free_panels'] ?? [];
     }
 
-    private function sendOrderToPanel(string $orderNumber, string $customerName, int $panelNumber): bool
+    private function sendOrderToPanel(string $orderNumber, string $customerName, int $panelNumber, int $smartbarOrderId): bool
     {
         $url = $this->baseUrl . '/api/orders';
         $payload = json_encode([
             'order_number' => $orderNumber,
             'customer_name' => $customerName,
             'panel_number' => $panelNumber,
+            'smartbar_order_id' => $smartbarOrderId,
         ], JSON_UNESCAPED_UNICODE);
 
         $this->log("POST /api/orders payload: {$payload}");
@@ -173,6 +174,40 @@ class PanelService
         $this->log("Send result: " . ($result ? 'OK' : 'FAILED'));
 
         return $result;
+    }
+
+    public function getCompletedOrders(): array
+    {
+        return $this->completionRequest('/api/completions');
+    }
+
+    public function acknowledgeCompletion(int $panelNumber, int $panelOrderId): void
+    {
+        $this->completionRequest("/api/completions/{$panelNumber}/{$panelOrderId}/ack", true);
+    }
+
+    private function completionRequest(string $path, bool $post = false): array
+    {
+        $ch = curl_init($this->baseUrl . $path);
+        if ($ch === false) {
+            throw new RuntimeException('Cannot init cURL for panel completion');
+        }
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => $post,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_HTTPHEADER => ['Accept: application/json'],
+        ]);
+        $response = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+        if ($response === false || $status !== ($post ? 204 : 200)) {
+            throw new RuntimeException("Panel completion request failed: HTTP {$status} {$error}");
+        }
+
+        return $post ? [] : json_decode($response, true, 512, JSON_THROW_ON_ERROR);
     }
 
     public function clearPanel(int $panelNumber): bool
