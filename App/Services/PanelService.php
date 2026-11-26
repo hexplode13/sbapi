@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Core\Database;
 use PDO;
 use Throwable;
+use RuntimeException;
 
 class PanelService
 {
@@ -47,6 +48,11 @@ class PanelService
      */
     public function tryAssignAndSendOrder(string $orderNumber, string $customerName, int $smartbarOrderId): ?int
     {
+        $customerName = trim($customerName);
+        if ($customerName === '') {
+            $customerName = 'Гость';
+        }
+
         $this->log("=== Start tryAssignAndSendOrder: order_number={$orderNumber}, customer={$customerName} ===");
 
         try {
